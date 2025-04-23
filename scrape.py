@@ -6,7 +6,7 @@ from scraping.scraper import NewsScraper, NewsSource
 
 def main():
     logger.info("Initiating BBC news scraper...")
-    bbc_news = NewsScraper(NewsSource.BBC)
+    bbc_news = NewsScraper(NewsSource.BBCNEWS)
 
     logger.info("Scraping BBC news...")
     articles = bbc_news.scrape()

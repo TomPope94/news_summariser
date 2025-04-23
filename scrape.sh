@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+
+export NEWS__DATABASE__ALLOW_FULL_TABLE_OPERATIONS=False
+export NEWS__DATABASE__CREDENTIALS__PASSWORD=password
+export NEWS__DATABASE__CREDENTIALS__USERNAME=postgres
+export NEWS__DATABASE__HOST=pgvector
+export NEWS__DATABASE__MAX_CONNECTIONS=1
+export NEWS__DATABASE__NAME=news_summariser
+export NEWS__DATABASE__PORT=5432
+export NEWS__DOMAIN=development:3000
+export NEWS__LOGGER__DEBUG=True
+export NEWS__LOGGER__LOGGER_NAME=AuthServiceApiHandler
+export NEWS__PROTOCOL=http
+export NEWS__SERVICE_NAME=news_summariser
+
+uv run scrape.py

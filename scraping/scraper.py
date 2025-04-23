@@ -6,24 +6,32 @@ from datetime import datetime
 
 from enum import Enum
 
+import time
+import requests
 from bs4 import BeautifulSoup
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 
 
 class NewsSource(Enum):
-    BBC = "BBC"
+    BBCNEWS = "BBCNews"
+    BBCSPORT = "BBCSport"
+    GUARDIAN = "Guardian"
+    REUTERS = "Reuters"
 
 
-news_url_map = {
-    NewsSource.BBC: "https://www.bbc.com/news"
+news_rss_map = {
+    NewsSource.BBCNEWS: "https://feeds.bbci.co.uk/news/rss.xml",
+    NewsSource.BBCSPORT: "https://feeds.bbci.co.uk/sport/rss.xml",
+    NewsSource.GUARDIAN: "https://www.theguardian.com/uk/rss",
+    NewsSource.REUTERS: "https://news.google.com/rss/search?q=site%3Areuters.com&hl=en-US&gl=US&ceid=US%3Aen",  # Using Google News RSS as workaround
 }
 
 
 class NewsScraper():
     def __init__(self, source: NewsSource):
         self.source = source
-        self.homepage = news_url_map[source]
+        self.rss_feed = news_rss_map[source]
 
         # Set up Selenium WebDriver
         options = Options()
@@ -37,7 +45,8 @@ class NewsScraper():
 
     def scrape(self, limit=50):
         """
-        Start scraping from the initial URL and follow links up to max_depth.
+        First, scrape the RSS feed to get all the articles that need to be scraped.
+        Second, scrape the articles collected
 
         Args:
             limit: Maximum number of articles to scrape
@@ -45,10 +54,13 @@ class NewsScraper():
             url: Optional URL to start scraping from
         """
         all_articles = {}  # Dictionary to track articles by URL
-        to_scrape = [self.homepage]  # URLs to scrape
+
+        logger.debug("Getting articles from RSS feed...")
+        to_scrape = self.get_articles_from_rss()
 
         while to_scrape and len(all_articles) < limit:
-            current_url = to_scrape.pop(0)
+            current_article = to_scrape.pop(0)
+            current_url = current_article.url
 
             # Skip if we've already scraped this URL
             if current_url in all_articles and all_articles[current_url].scraped:
@@ -56,60 +68,52 @@ class NewsScraper():
 
             logger.info(f"Scraping: {current_url}")
             self.driver.get(current_url)
+            time.sleep(1.5)  # Wait for the page to load
 
             html = self.driver.page_source
             logger.debug("Parsing HTML content...")
 
-            # If it's the main page, get linked articles
-            if current_url == self.homepage:
-                logger.debug("Homepage detected, parsing main page...")
-                linked_articles = self.parse_main_page(html)
+            article_data = self.parse_article_page(html, current_url)
 
-                for article in linked_articles:
-                    full_url = f"https://www.bbc.com{article.url}" if not article.url.startswith("http") else article.url
-                    if full_url not in all_articles:
-                        all_articles[full_url] = article
-                        to_scrape.append(full_url)
+            # Store or update the article
+            if current_url not in all_articles:
+                all_articles[current_url] = article_data
             else:
-                # It's an article page
-                logger.debug("Article page detected, parsing article...")
-                article_data = self.parse_article_page(html, current_url)
+                # Update existing article with content
+                all_articles[current_url].contents = article_data.contents
+                all_articles[current_url].title = article_data.title
+                all_articles[current_url].linked_articles = article_data.linked_articles
+                all_articles[current_url].date = article_data.date
 
-                # Store or update the article
-                if current_url not in all_articles:
-                    all_articles[current_url] = article_data
-                else:
-                    # Update existing article with content
-                    all_articles[current_url].contents = article_data.contents
-                    all_articles[current_url].title = article_data.title
-                    all_articles[current_url].linked_articles = article_data.linked_articles
-                    all_articles[current_url].date = article_data.date
+            # Mark as scraped
+            all_articles[current_url].scraped = True
 
-                # Mark as scraped
-                all_articles[current_url].scraped = True
-
-                # Add linked articles to the queue
-                for link in article_data.linked_articles:
-                    full_url = f"https://www.bbc.com{link}" if not link.startswith("http") else link
-                    if full_url not in all_articles and len(all_articles) < limit:
-                        # Create a new article placeholder
-                        all_articles[full_url] = Article(
-                            url=full_url,
-                            linked_articles=[],
-                            scraped=False
-                        )
-                        to_scrape.append(full_url)
+            # Add linked articles to the queue
+            for link in article_data.linked_articles:
+                full_url = f"https://www.bbc.com{link}" if not link.startswith("http") else link
+                if full_url not in all_articles and len(all_articles) < limit:
+                    # Create a new article placeholder
+                    new_article = Article(
+                        url=full_url,
+                        linked_articles=[],
+                        scraped=False
+                    )
+                    all_articles[full_url] = new_article
+                    to_scrape.append(new_article)
 
         # After the main loop acquires n articles, need to finish scraping them
         while to_scrape and len(all_articles) >= limit:
             # Remove the last article from the list
-            current_url = to_scrape.pop(0)
+            current_article = to_scrape.pop(0)
+            current_url = current_article.url
+
             # Skip if we've already scraped this URL
             if current_url in all_articles and all_articles[current_url].scraped:
                 continue
 
             logger.info(f"Scraping: {current_url}")
             self.driver.get(current_url)
+            time.sleep(1.5)  # Wait for the page to load
 
             html = self.driver.page_source
             logger.debug("Parsing HTML content...")
@@ -132,43 +136,32 @@ class NewsScraper():
         logger.debug(f"all_articles: {len(all_articles)}")
         return list(all_articles.values())
 
-    def parse_main_page(self, html_content) -> List[Article]:
+    def get_articles_from_rss(self) -> List[Article]:
         """
-        Parse the main page HTML content and extract article links.
+        Get articles from the RSS feed.
         """
-        soup = BeautifulSoup(html_content, 'html.parser')
+        response = requests.get(self.rss_feed)
+        if response.status_code != 200:
+            logger.error(f"Failed to fetch RSS feed: {response.status_code}")
+            return []
+
+        soup = BeautifulSoup(response.content, 'xml')
         articles = []
 
-        for item in soup.find_all('a'):
-            if item.get('href') is None:
-                continue
+        for item in soup.find_all('item'):
+            title = item.title.text
+            link = item.link.text
+            date = item.pubDate.text
 
-            link = item['href']
+            if link.startswith("https://www.bbc.com/news/articles"):
+                articles.append(Article(
+                    title=title,
+                    url=link,
+                    date=datetime.strptime(date, "%a, %d %b %Y %H:%M:%S %Z"),
+                    linked_articles=[],
+                    scraped=False
+                ))
 
-            # Only want links to /news/articles
-            if not link.startswith("/news/articles"):
-                continue
-
-            title = item.get_text().strip()
-            if not title:  # Skip empty titles
-                continue
-
-            class_names = item.get('class', [])
-
-            # Only want classes that include PromoLink
-            if not any("PromoLink" in c for c in class_names):
-                continue
-
-            parsed_article = Article(
-                title=title,
-                url=link,
-                linked_articles=[],
-                scraped=False
-            )
-
-            articles.append(parsed_article)
-
-        logger.debug(f"Found {len(articles)} articles on the main page.")
         return articles
 
     def parse_article_page(self, html_content, url) -> Article:
